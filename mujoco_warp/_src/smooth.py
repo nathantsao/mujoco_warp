@@ -3680,7 +3680,7 @@ def _solve_LD_sparse(
     return
 
   nlevels = len(m.qLD_updates)
-  if wp.get_device().is_cuda:
+  if not wp.get_device().is_cpu:
     dim_block = m.block_dim.solve_LD_sparse_fused
   else:
     # Fallback for CPU

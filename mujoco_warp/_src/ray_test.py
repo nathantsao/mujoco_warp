@@ -706,6 +706,70 @@ class RayTest(parameterized.TestCase):
     _assert_eq(dist_bvh.numpy(), dist.numpy(), "bvh dist")
     _assert_eq(normal_bvh.numpy()[:, :2], normal.numpy()[:, :2], "bvh normal")
 
+  @parameterized.product(nworld=(1, 2), capture=(False, True))
+  def test_refit_rays_matches_cpu(self, nworld, capture):
+    """Repeated BVH refits and ray queries preserve heterogeneous world state."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <worldbody>
+          <geom type="plane" size="5 5 .1"/>
+          <body pos="0 0 1">
+            <freejoint/>
+            <geom type="sphere" size=".5"/>
+          </body>
+        </worldbody>
+      </mujoco>
+      """,
+      nworld=nworld,
+    )
+    rc = mjw.create_render_context(mjm, nworld=nworld, cam_active=[], use_textures=False, render_skybox=False)
+    origin = np.array([0.0, 0.0, 4.0], dtype=np.float32)
+    direction = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+    pnt = wp.array(np.tile(origin, (nworld, 1, 1)), dtype=wp.vec3)
+    vec = wp.array(np.tile(direction, (nworld, 1, 1)), dtype=wp.vec3)
+    bodyexclude = wp.full(1, -1, dtype=int)
+    geomgroup = vec6(-1, -1, -1, -1, -1, -1)
+    dist = wp.empty((nworld, 1), dtype=float)
+    geomid = wp.empty((nworld, 1), dtype=int)
+    normal = wp.empty((nworld, 1), dtype=wp.vec3)
+
+    def query():
+      mjw.refit_bvh(m, d, rc)
+      mjw.rays(m, d, pnt, vec, geomgroup, True, bodyexclude, dist, geomid, normal, rc=rc)
+
+    graph = None
+    if capture:
+      with wp.ScopedCapture() as captured:
+        query()
+      graph = captured.graph
+
+    qpos = d.qpos.numpy()
+    for frame in range(3):
+      qpos[:, 2] = 1.0 + 0.1 * frame + 0.5 * np.arange(nworld)
+      d.qpos.assign(qpos)
+      mjw.forward(m, d)
+      dist.fill_(wp.inf)
+      geomid.fill_(-1)
+      normal.fill_(wp.inf)
+      if graph is None:
+        query()
+      else:
+        wp.capture_launch(graph)
+
+      distances, geomids, normals = dist.numpy(), geomid.numpy(), normal.numpy()
+      for world in range(nworld):
+        mjd.qpos[:] = qpos[world]
+        mujoco.mj_forward(mjm, mjd)
+        expected_geom = np.zeros(1, dtype=np.int32)
+        expected_normal = np.zeros(3, dtype=np.float64)
+        expected_dist = mujoco.mj_ray(mjm, mjd, origin, direction, None, 1, -1, expected_geom, expected_normal)
+        _assert_eq(distances[world, 0], expected_dist, "distance")
+        _assert_eq(geomids[world, 0], expected_geom[0], "geomid")
+        _assert_eq(normals[world, 0], expected_normal, "normal")
+      if nworld == 2:
+        self.assertNotEqual(distances[0, 0], distances[1, 0])
+
   def test_ray_module_is_unique(self):
     """Ensure _ray does not share a module with _ray_bvh."""
     self.assertNotEqual(mjw._src.ray._ray.module, mjw._src.ray._ray_bvh.module)

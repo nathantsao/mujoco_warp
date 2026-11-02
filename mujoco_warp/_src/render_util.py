@@ -414,7 +414,7 @@ def create_render_context(
   mjd = mujoco.MjData(mjm)
   mujoco.mj_forward(mjm, mjd)
 
-  constructor = "cubql"
+  constructor = "cubql" if wp.get_device().is_cuda else "sah"
 
   # Build grouped splat BVH.
   splat_attribute = (splat_position, splat_rotation, splat_scale, splat_rgba)

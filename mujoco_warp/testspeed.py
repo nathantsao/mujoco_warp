@@ -38,6 +38,7 @@ import mujoco_warp as mjw
 
 # mjwarp-testspeed has priviledged access to a few internal methods
 from mujoco_warp._src import cli
+from mujoco_warp._src import warp_util
 from mujoco_warp._src.collision_driver import MJ_COLLISION_TABLE
 from mujoco_warp._src.types import CollisionType
 from mujoco_warp._src.types import OverflowType
@@ -280,12 +281,18 @@ def _main(argv: Sequence[str]):
         sys.exit(1)
 
   if _FUNCTION.value == "render":
-    with wp.ScopedCapture() as step_capture:
-      mjw.step(m, d)
+    step_graph = None
+    if warp_util.graph_capture_supported():
+      with wp.ScopedCapture() as step_capture:
+        mjw.step(m, d)
+      step_graph = step_capture.graph
 
     def render_callback(step, step_trace, latency):
       callback(step, step_trace, latency)
-      wp.capture_launch(step_capture.graph)
+      if step_graph is None:
+        mjw.step(m, d)
+      else:
+        wp.capture_launch(step_graph)
       wp.synchronize()
 
     # TODO(team): Support specifying multiple functions to benchmark them together,

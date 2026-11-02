@@ -2204,6 +2204,37 @@ class IOTest(parameterized.TestCase):
     m.mat_texid.assign(mat_texid)
     np.testing.assert_array_equal(m.mat_texid.numpy()[:, mat_id, rgb_role], [red_id, green_id, red_id])
 
+  @parameterized.parameters(1, 2)
+  def test_put_model_eq_data(self, batch_size):
+    """Test equality data preserves the installed MuJoCo record width and values."""
+    mjm = mujoco.MjModel.from_xml_string(
+      """
+      <mujoco>
+        <worldbody>
+          <body name="b1">
+            <joint name="j1"/>
+            <geom type="sphere" size="0.1"/>
+          </body>
+          <body name="b2" pos="1 0 0">
+            <joint name="j2"/>
+            <geom type="sphere" size="0.1"/>
+          </body>
+        </worldbody>
+        <equality>
+          <joint joint1="j1" joint2="j2" polycoef="0.1 0.8 -0.2 0.1 0.05"/>
+          <weld body1="b1" body2="b2"/>
+        </equality>
+      </mujoco>
+      """
+    )
+    mjm.eq_data[:, -1] = [0.25, 0.75]
+    m = mjwarp.put_model(mjm, batch_sizes={"eq_data": batch_size})
+    expected = np.repeat(mjm.eq_data[None], batch_size, axis=0).astype(np.float32)
+
+    self.assertEqual(m.eq_data.shape, (batch_size, mjm.neq))
+    self.assertEqual(m.eq_data.numpy().shape, (batch_size, mjm.neq, mujoco.mjNEQDATA))
+    np.testing.assert_array_equal(m.eq_data.numpy(), expected)
+
   def test_put_model_batch_sizes_errors(self):
     """Test invalid put_model batch_sizes requests are rejected."""
     mjm = mujoco.MjModel.from_xml_string(

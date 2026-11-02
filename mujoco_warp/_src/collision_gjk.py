@@ -2111,7 +2111,9 @@ def _witness_on_face(v: wp.vec3, p: wp.vec3, n: wp.vec3, dir: wp.vec3) -> Tuple[
 
 
 # clip a polygon against another polygon
-@wp.func
+# TODO: Remove after the fresh-cache CCD/box-box gate passes without this IGC 2.40.13 workaround.
+# Repro/removal: sibling warp/design/sycl-backend.md#compiler-workaround-lifecycle.
+@wp.func(override={"sycl": False})
 def _polygon_clip(
   # In:
   plane_normal: wp.array[wp.vec3],

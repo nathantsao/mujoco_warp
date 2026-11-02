@@ -186,6 +186,93 @@ class RenderTest(parameterized.TestCase):
 
     _assert_eq(rgb_np, rc.rgb_data.numpy(), "rgb_data")
 
+  @parameterized.parameters(1, 2, 64, 1024, 4096)
+  def test_render_refit_capture(self, nworld: int):
+    """Captured forward, refit and textured rendering track changing batched state."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <asset>
+          <texture name="red" type="2d" builtin="flat" width="2" height="2" rgb1="1 0 0"/>
+          <texture name="green" type="2d" builtin="flat" width="2" height="2" rgb1="0 1 0"/>
+          <material name="mat" texture="red" rgba="1 1 1 1"/>
+        </asset>
+        <worldbody>
+          <camera pos="0 0 4" xyaxes="1 0 0 0 1 0"/>
+          <geom type="plane" size="5 5 .1"/>
+          <body pos="0 0 1">
+            <freejoint/>
+            <geom type="sphere" size=".35" material="mat"/>
+          </body>
+        </worldbody>
+      </mujoco>
+      """,
+      nworld=nworld,
+      batch_sizes={"mat_texid": nworld},
+    )
+    rc = mjw.create_render_context(
+      mjm,
+      nworld=nworld,
+      cam_res=(17, 17),
+      render_rgb=True,
+      render_depth=True,
+      render_seg=True,
+      enable_specular=False,
+      enable_emission=False,
+    )
+    self.assertEqual(rc.rgb_data.shape, (nworld, 289))
+    self.assertEqual(rc.depth_data.shape, (nworld, 289))
+    self.assertEqual(rc.seg_data.shape, (nworld, 289))
+    self.assertEqual(rc.rgb_data.dtype, wp.uint32)
+    self.assertEqual(rc.depth_data.dtype, wp.float32)
+    self.assertEqual(rc.seg_data.dtype, wp.vec2i)
+
+    def draw():
+      mjw.forward(m, d)
+      mjw.refit_bvh(m, d, rc)
+      mjw.render(m, d, rc)
+
+    draw()
+    with wp.ScopedCapture() as capture:
+      draw()
+
+    qpos = d.qpos.numpy().copy()
+    texid = m.mat_texid.numpy().copy()
+    center = 8 * 17 + 8
+    for frame in range(3):
+      qpos[:, 2] = 1.0 + 0.1 * frame + 0.2 * (np.arange(nworld) % 2)
+      d.qpos.assign(qpos)
+      texture_ids = (np.arange(nworld) + frame) % 2
+      texid[:, 0, 1] = texture_ids
+      m.mat_texid.assign(texid)
+      draw()
+      expected = [value.numpy().copy() for value in (rc.rgb_data, rc.depth_data, rc.seg_data)]
+      rc.rgb_data.fill_(0xFFFFFFFF)
+      rc.depth_data.fill_(wp.inf)
+      rc.seg_data.fill_(wp.vec2i(-1, -1))
+      wp.capture_launch(capture.graph)
+      rgb, depth, seg = (value.numpy() for value in (rc.rgb_data, rc.depth_data, rc.seg_data))
+      np.testing.assert_array_equal(rgb, expected[0])
+      _assert_eq(depth, expected[1], "captured depth")
+      np.testing.assert_array_equal(seg, expected[2])
+      self.assertTrue(np.all(np.isfinite(depth)))
+      np.testing.assert_array_equal(seg[:, center, 0], 1)
+      np.testing.assert_array_equal(seg[:, center, 1], int(mjw.ObjType.GEOM))
+      color = _unpack_rgb(rgb[:, center])
+      self.assertTrue(np.all(color[texture_ids == 0, 0] > color[texture_ids == 0, 1]))
+      self.assertTrue(np.all(color[texture_ids == 1, 1] > color[texture_ids == 1, 0]))
+      for world in range(min(nworld, 2)):
+        mjd.qpos[:] = qpos[world]
+        mujoco.mj_forward(mjm, mjd)
+        geom = np.zeros(1, dtype=np.int32)
+        distance = mujoco.mj_ray(mjm, mjd, np.array([0.0, 0.0, 4.0]), np.array([0.0, 0.0, -1.0]), None, 1, -1, geom)
+        self.assertEqual(geom[0], 1)
+        _assert_eq(depth[world, center], distance, "reference depth")
+      _assert_eq(depth[:, center], 4.0 - qpos[:, 2] - 0.35, "batched depth")
+      if nworld > 1:
+        self.assertNotEqual(depth[0, center], depth[1, center])
+        self.assertFalse(np.array_equal(color[0], color[1]))
+
   @parameterized.parameters(2, 512)
   def test_render_segmentation(self, nworld: int):
     mjm, mjd, m, d = test_data.fixture("primitives.xml", nworld=nworld)

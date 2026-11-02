@@ -106,8 +106,10 @@ def _assemble_benchmark(bm: dict):
   shutil.copytree(bm["_dir"], benchmark_dir, dirs_exist_ok=True)
 
 
-def _bm_flags(bm: dict, benchmark_root: Path, exclude: tuple = ()) -> list:
+def _bm_flags(bm: dict, benchmark_root: Path, exclude: tuple = (), overrides: dict | None = None) -> list:
   """Build --flag=value CLI args from a benchmark dict, shared by testspeed and viewer."""
+  if overrides is not None:
+    bm = bm | {field: value for field, value in overrides.items() if value is not None}
   skip = ("name", "assets", "mjcf", "_dir", *exclude)
   cmd = []
   for field, value in bm.items():
@@ -136,7 +138,7 @@ def _run_benchmark(bm: dict, input_dir: Path) -> dict:
     "--measure_solver=true",
     "--measure_alloc=true",
   ]
-  cmd += _bm_flags(bm, benchmark_root)
+  cmd += _bm_flags(bm, benchmark_root, overrides={"device": _ARGS.device, "nworld": _ARGS.nworld})
 
   result = uv_run(*cmd, cwd=input_dir)
 
@@ -161,7 +163,7 @@ def _view_benchmark(bm: dict, input_dir: Path):
   ]
   # nworld is forced to 1 above for interactive viewing; function selects an
   # alternate benchmark entry point (e.g. render) that mjwarp-viewer doesn't support.
-  cmd += _bm_flags(bm, benchmark_root, exclude=("nworld", "function"))
+  cmd += _bm_flags(bm, benchmark_root, exclude=("nworld", "function"), overrides={"device": _ARGS.device})
 
   log.info("Command: uv run %s", " ".join(cmd))
   subprocess.run(("uv", "run") + tuple(cmd), cwd=input_dir, check=True)
@@ -173,6 +175,8 @@ def main():
   parser.add_argument("--input", default=".", help="git uri or path to mujoco_warp repo to benchmark")
   parser.add_argument("-f", "--filter", default=".*", help="filter benchmarks by name (regex)")
   parser.add_argument("--view", action="store_true", help="open the benchmark in mjwarp-viewer instead of running testspeed")
+  parser.add_argument("--device", default=None, help="override the Warp device, e.g. cuda:0 or sycl:0")
+  parser.add_argument("--nworld", type=int, default=None, help="override the number of parallel rollouts")
   parser.add_argument("--assets_root", default="/tmp/benchmark_assets", help="root directory to assemble benchmark assets")
   parser.add_argument(
     "--clear_warp_cache",
@@ -182,6 +186,8 @@ def main():
   )
 
   _ARGS = parser.parse_args()
+  if _ARGS.nworld is not None and _ARGS.nworld <= 0:
+    parser.error("--nworld must be positive")
 
   input_dir = clone_if_needed(_ARGS.input, "mjwarp-run-")
   benchmarks = list(_discover_benchmarks(input_dir))

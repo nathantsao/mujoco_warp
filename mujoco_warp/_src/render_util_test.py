@@ -182,6 +182,20 @@ class RenderUtilTest(parameterized.TestCase):
     group_np = rc.group.numpy()
     _assert_eq(group_np, np.repeat(np.arange(nworld), rc.bvh_ngeom), "render context group values")
 
+  @parameterized.parameters(1, 2)
+  def test_mesh_hfield_bvh_without_cameras(self, nworld):
+    """Raycast-only contexts build mesh and heightfield BVHs without textures."""
+    mjm, _, _, _ = test_data.fixture("ray.xml", nworld=nworld)
+    rc = mjw.create_render_context(mjm, nworld=nworld, cam_active=[], use_textures=False, render_skybox=False)
+
+    self.assertGreater(mjm.nmesh, 0)
+    self.assertGreater(mjm.nhfield, 0)
+    self.assertTrue(np.all(rc.mesh_bvh_id.numpy() != 0))
+    self.assertTrue(np.all(rc.hfield_bvh_id.numpy() != 0))
+    self.assertEqual(rc.group_root.shape, (nworld,))
+    self.assertEmpty(rc.textures_registry)
+    self.assertEqual(rc.nrender, 0)
+
   def test_use_textures_flag(self):
     """create_render_context honors use_textures: skip texture materialization when False."""
     mjm, mjd, m, d = test_data.fixture(

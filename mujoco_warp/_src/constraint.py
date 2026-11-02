@@ -5511,7 +5511,7 @@ def make_constraint(m: types.Model, d: types.Data):
           # Loop over the active contacts with a GPU-sized grid rather than launching naconmax
           # threads; several waves, since longer per-thread loops over contacts are slower.
           ncontact_per_pass = d.naconmax
-          if wp.get_device().is_cuda:
+          if not wp.get_device().is_cpu:
             ncontact_per_pass = min(ncontact_per_pass, 1024 * wp.get_device().sm_count)
           ncontact_stride = max(ncontact_per_pass, 1)
           max_records = ((d.naconmax + ncontact_stride - 1) // ncontact_stride) * nmaxdim if det_atomics else 0

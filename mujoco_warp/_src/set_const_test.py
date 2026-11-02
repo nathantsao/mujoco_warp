@@ -226,7 +226,7 @@ class SetConstTest(parameterized.TestCase):
 
     # case 2: unmarked weld (data[11] == 0): set_const leaves relpose unchanged
     new_data = mjm.eq_data[0].copy()
-    new_data[3:10] = [0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    new_data[3:10] = [0.5, 0.0, 0.0, 2.0, 0.0, 2.0, 0.0]
     new_data[11] = 0.0
     mjm.eq_data[0] = new_data
     eq_data[:, 0] = new_data
@@ -239,6 +239,60 @@ class SetConstTest(parameterized.TestCase):
     for w in range(nworld):
       _assert_eq(eq_data_np[w], mjm.eq_data, f"unmarked_eq_data_world_{w}")
       _assert_eq(eq_data_np[w, 0, 3:10], new_data[3:10], f"unmarked_relpose_world_{w}")
+
+  @parameterized.product(nworld=(1, 2), automatic=(False, True))
+  def test_set_const_weld_relpose(self, nworld, automatic):
+    """Test repeated weld pose updates match MuJoCo in heterogeneous worlds."""
+    mjm, _, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <option gravity="0 0 0">
+          <flag contact="disable"/>
+        </option>
+        <worldbody>
+          <body name="b1" pos="0.1 0 0">
+            <joint axis="0 0 1"/>
+            <geom type="sphere" size="0.05"/>
+          </body>
+          <body name="b2" pos="0.4 0 0" euler="0 0 20">
+            <joint axis="0 1 0"/>
+            <geom type="sphere" size="0.05"/>
+          </body>
+        </worldbody>
+        <equality>
+          <weld body1="b1" body2="b2" anchor="0.1 0.2 0.3"/>
+        </equality>
+      </mujoco>
+      """,
+      nworld=nworld,
+      batch_sizes={"body_pos": nworld, "eq_data": nworld},
+    )
+    body_pos = m.body_pos.numpy().copy()
+    eq_data = m.eq_data.numpy().copy()
+    expected = []
+    for worldid in range(nworld):
+      body_pos[worldid, 2, 0] += 0.2 * (worldid + 1)
+      if mujoco.mjNEQDATA > 11:
+        eq_data[worldid, 0, 11] = float(automatic)
+      if automatic:
+        if mujoco.mjNEQDATA == 11:
+          eq_data[worldid, 0, 6:10] = 0.0
+      else:
+        eq_data[worldid, 0, 6:10] = [2.0, 0.0, 2.0 + worldid, 0.0]
+
+      reference = copy.copy(mjm)
+      reference.body_pos[:] = body_pos[worldid]
+      reference.eq_data[:] = eq_data[worldid]
+      mujoco.mj_setConst(reference, mujoco.MjData(reference))
+      expected.append(reference.eq_data.copy())
+
+    m.body_pos.assign(body_pos)
+    m.eq_data.assign(eq_data)
+    mjwarp.set_const(m, d)
+
+    _assert_eq(m.eq_data.numpy(), np.array(expected), "eq_data")
+    if nworld == 2:
+      self.assertFalse(np.array_equal(expected[0], expected[1]))
 
   def test_set_const_eq_data_slider_crank_tracking(self):
     """Test connect anchor recompute on a slider-crank with nonzero joint ref."""

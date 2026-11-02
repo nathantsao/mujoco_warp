@@ -35,6 +35,9 @@ uv run python3 benchmarks/run.py -f unitree_g1
 
 # Run all benchmarks with "cloth" in the name
 uv run python3 benchmarks/run.py -f cloth
+
+# Run Unitree G1 Flat benchmark with selected device and number of parallel rollouts
+uv run python3 benchmarks/run.py -f '^unitree_g1_flat$' --device=sycl:0 --nworld=4096 
 ```
 
 ## Output Format

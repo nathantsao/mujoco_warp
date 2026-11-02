@@ -15,7 +15,10 @@
 
 """Shared utilities and flags for MJWarp CLI tools."""
 
+import contextlib
+import dataclasses
 import time
+from collections.abc import Generator
 from typing import Callable, Tuple, get_type_hints
 
 import mujoco
@@ -237,6 +240,44 @@ def init_structs(
     return m, d, rc, ctrls
 
 
+@contextlib.contextmanager
+def _preserve_arrays(*objects: mjw.Data | mjw.RenderContext | None) -> Generator[None, None, None]:
+  """Preserves nested array contents without requiring another device-sized allocation."""
+  snapshots: list[tuple[wp.array, wp.array]] = []
+  devices: dict[str, wp.Device] = {}
+  visited: set[int] = set()
+
+  def save(value: object) -> None:
+    if id(value) in visited:
+      return
+    visited.add(id(value))
+    if isinstance(value, wp.array):
+      device = value.device
+      if device is None:
+        raise ValueError("Cannot preserve a Warp array without a device")
+      snapshots.append((value, wp.clone(value, device="cpu")))
+      devices[device.alias] = device
+    elif dataclasses.is_dataclass(value):
+      for field in dataclasses.fields(value):
+        save(getattr(value, field.name))
+    elif isinstance(value, dict):
+      for item in value.values():
+        save(item)
+    elif isinstance(value, (tuple, list)):
+      for item in value:
+        save(item)
+
+  for obj in objects:
+    save(obj)
+  try:
+    yield
+  finally:
+    for array, snapshot in snapshots:
+      wp.copy(array, snapshot)
+    for device in devices.values():
+      wp.synchronize_device(device)
+
+
 def unroll(
   fn: Callable[..., None],
   m: mjw.Model,
@@ -244,7 +285,7 @@ def unroll(
   rc: mjw.RenderContext | None,
   callback: Callable[[int, dict, float], None] | None = None,
   ctrls: list[np.ndarray] | None = None,
-) -> dict:
+) -> float:
   """Unroll a function on batched Data and return some statistics.
 
   Args:
@@ -256,42 +297,61 @@ def unroll(
     ctrls: Optional control trajectory.
 
   Returns:
-    jit_duration: Time to JIT capture the function.
+    float: Time spent capturing or compiling, excluding state preservation.
   """
   with wp.ScopedDevice(wp.get_device(DEVICE.value)):
-    with warp_util.EventTracer(enabled=EVENT_TRACE.value) as tracer:
-      jit_beg = time.perf_counter()
-      with wp.ScopedCapture() as capture:
-        fn(*(m, d) if rc is None else (m, d, rc))
-      jit_end = time.perf_counter()
+    capture_supported = warp_util.graph_capture_supported(event_trace=EVENT_TRACE.value)
+    with warp_util.EventTracer(enabled=EVENT_TRACE.value and capture_supported) as captured_tracer:
+      graph = None
+      if capture_supported:
+        jit_beg = time.perf_counter()
+        with wp.ScopedCapture() as capture:
+          fn(*(m, d) if rc is None else (m, d, rc))
+        graph = capture.graph
+        if graph is None:
+          raise RuntimeError("Graph capture completed without an executable graph")
+        jit_duration = time.perf_counter() - jit_beg
+      else:
+        with _preserve_arrays(d, rc):
+          jit_beg = time.perf_counter()
+          fn(*(m, d) if rc is None else (m, d, rc))
+          wp.synchronize_device()
+          jit_duration = time.perf_counter() - jit_beg
 
       for i in range(NSTEP.value):
-        with wp.ScopedStream(wp.get_stream()):
-          if ctrls is not None:
-            center = wp.array(ctrls[i], dtype=wp.float32)
-            wp.launch(
-              _ctrl_noise,
-              dim=(d.nworld, m.nu),
-              inputs=[
-                m.opt.timestep,
-                m.actuator_ctrllimited,
-                m.actuator_ctrlrange,
-                d.ctrl,
-                center,
-                i,
-                NOISE_STD.value,
-                NOISE_RATE.value,
-              ],
-              outputs=[d.ctrl],
-            )
+        trace_context = (
+          contextlib.nullcontext(captured_tracer) if graph is not None else warp_util.EventTracer(enabled=EVENT_TRACE.value)
+        )
+        with trace_context as tracer:
+          with contextlib.nullcontext() if wp.get_device().is_cpu else wp.ScopedStream(wp.get_stream()):
+            if ctrls is not None:
+              center = wp.array(ctrls[i], dtype=wp.float32)
+              wp.launch(
+                _ctrl_noise,
+                dim=(d.nworld, m.nu),
+                inputs=[
+                  m.opt.timestep,
+                  m.actuator_ctrllimited,
+                  m.actuator_ctrlrange,
+                  d.ctrl,
+                  center,
+                  i,
+                  NOISE_STD.value,
+                  NOISE_RATE.value,
+                ],
+                outputs=[d.ctrl],
+              )
+              wp.synchronize()
+
+            run_beg = time.perf_counter()
+            if graph is not None:
+              wp.capture_launch(graph)
+            else:
+              fn(*(m, d) if rc is None else (m, d, rc))
             wp.synchronize()
+            run_end = time.perf_counter()
 
-          run_beg = time.perf_counter()
-          wp.capture_launch(capture.graph)
-          wp.synchronize()
-          run_end = time.perf_counter()
+          if callback:
+            callback(i, tracer.trace(), run_end - run_beg)
 
-        if callback:
-          callback(i, tracer.trace(), run_end - run_beg)
-
-  return jit_end - jit_beg
+  return jit_duration

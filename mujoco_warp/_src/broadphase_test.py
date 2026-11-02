@@ -15,6 +15,9 @@
 
 """Tests for broadphase functions."""
 
+import copy
+
+import mujoco
 import numpy as np
 import warp as wp
 from absl.testing import absltest
@@ -47,6 +50,64 @@ class BroadphaseTest(parameterized.TestCase):
   plane_sphere_aabb = plane_sphere | BroadphaseFilter.AABB
   plane_sphere_obb = plane_sphere | BroadphaseFilter.OBB
   plane_sphere_aabb_obb = plane_sphere_aabb | BroadphaseFilter.OBB
+
+  @parameterized.parameters(1, 2)
+  def test_sap_tile_graph_capture(self, nworld):
+    """Captured tiled SAP preserves collision pairs across heterogeneous worlds."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <worldbody>
+          <body pos="-.15 0 0">
+            <freejoint/>
+            <geom type="sphere" size=".2"/>
+          </body>
+          <body pos=".15 0 0">
+            <freejoint/>
+            <geom type="sphere" size=".2"/>
+          </body>
+          <body pos=".8 0 0">
+            <freejoint/>
+            <geom type="sphere" size=".2"/>
+          </body>
+        </worldbody>
+      </mujoco>
+      """,
+      overrides={"opt.broadphase": BroadphaseType.SAP_TILE},
+      nworld=nworld,
+    )
+    references = [copy.copy(mjd) for _ in range(nworld)]
+    if nworld == 2:
+      references[1].qpos[14] = 0.0
+    with wp.ScopedCapture() as capture:
+      ctx = broadphase_caller(m, d)
+
+    def collision_pairs(context):
+      count = int(d.ncollision.numpy()[0])
+      pairs = context.collision_pair.numpy()[:count]
+      worldids = context.collision_worldid.numpy()[:count]
+      return [(int(world), *sorted(pair)) for world, pair in zip(worldids, pairs, strict=True)]
+
+    for _ in range(3):
+      expected = []
+      for world, reference in enumerate(references):
+        reference.qpos[1] += 0.005
+        mujoco.mj_forward(mjm, reference)
+        expected.extend((world, *sorted(pair)) for pair in reference.contact.geom)
+      d.geom_xpos.assign(np.stack([reference.geom_xpos for reference in references]))
+      d.geom_xmat.assign(np.stack([reference.geom_xmat for reference in references]))
+      d.ncollision.fill_(-1)
+      ctx.collision_pair.fill_(-1)
+      ctx.collision_worldid.fill_(-1)
+      wp.capture_launch(capture.graph)
+      captured = collision_pairs(ctx)
+      self.assertCountEqual(captured, expected)
+      eager = collision_pairs(broadphase_caller(m, d))
+      self.assertCountEqual(captured, eager)
+      self.assertEqual(len(captured), 1 if nworld == 1 else 4)
+      if nworld == 2:
+        self.assertEqual(sum(pair[0] == 0 for pair in captured), 1)
+        self.assertEqual(sum(pair[0] == 1 for pair in captured), 3)
 
   @parameterized.product(
     broadphase=list(BroadphaseType),
@@ -157,12 +218,12 @@ class BroadphaseTest(parameterized.TestCase):
     ncollision = d3.ncollision.numpy()[0]
     np.testing.assert_allclose(ncollision, 4)
 
-    collision_pairs = [[[0, 1]], [[0, 1], [0, 2], [1, 2]]]
-    worldids = [0, 1, 1, 1]
-    for i in range(ncollision):
-      worldid = ctx3.collision_worldid.numpy()[i]
-      self.assertTrue(worldid == worldids[i])
-      self.assertTrue([ctx3.collision_pair.numpy()[i][0], ctx3.collision_pair.numpy()[i][1]] in collision_pairs[worldid])
+    collision_pairs = ctx3.collision_pair.numpy()[:ncollision]
+    worldids = ctx3.collision_worldid.numpy()[:ncollision]
+    self.assertCountEqual(
+      [(int(worldid), int(pair[0]), int(pair[1])) for worldid, pair in zip(worldids, collision_pairs, strict=True)],
+      [(0, 0, 1), (1, 0, 1), (1, 0, 2), (1, 1, 2)],
+    )
 
     # one world and zero collisions: contype and conaffinity incompatibility
     mjm4, _, m4, d4 = test_data.fixture(xml=_XML, keyframe=1)

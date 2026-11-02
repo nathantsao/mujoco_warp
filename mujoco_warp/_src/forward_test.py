@@ -15,6 +15,9 @@
 
 """Tests for forward dynamics functions."""
 
+import copy
+from unittest import mock
+
 import mujoco
 import numpy as np
 import warp as wp
@@ -32,6 +35,7 @@ from mujoco_warp import IntegratorType
 from mujoco_warp import SolverType
 from mujoco_warp import test_data
 from mujoco_warp._src import util_pkg
+from mujoco_warp._src import warp_util
 
 # tolerance for difference between MuJoCo and mjwarp smooth calculations - mostly
 # due to float precision
@@ -630,6 +634,116 @@ class ForwardTest(parameterized.TestCase):
     wp.capture_launch(capture.graph)
 
     self.assertTrue(d.time.numpy()[0] > 0.0)
+
+  def test_graph_capture_capabilities(self):
+    """Ordinary capture and conditional graphs have independent device policies."""
+    device = wp.get_device()
+    self.assertEqual(warp_util.graph_capture_supported(), device.supports_graph_capture)
+    conditional_supported = device.is_conditional_graph_supported
+    self.assertEqual(warp_util.graph_conditional_supported(), conditional_supported)
+    with warp_util.EventTracer(enabled=True):
+      self.assertEqual(
+        warp_util.graph_capture_supported(),
+        device.supports_graph_capture and (device.is_cpu or device.is_graph_capture_event_supported),
+      )
+      self.assertEqual(warp_util.graph_conditional_supported(), conditional_supported)
+    self.assertEqual(warp_util.graph_capture_supported(), device.supports_graph_capture)
+
+  @parameterized.named_parameters(
+    ("cpu", "cpu", True, False, True, True),
+    ("cuda", "cuda", True, True, True, True),
+    ("cuda_without_conditionals", "cuda", True, True, False, True),
+    ("sycl_native", "sycl", True, True, False, True),
+    ("sycl_ordinary_only", "sycl", True, False, False, False),
+    ("no_graphs", "sycl", False, False, False, False),
+    ("no_graphs_with_timing", "sycl", False, True, False, False),
+  )
+  def test_graph_capture_policy(self, backend, graphs, events, conditionals, traced_capture):
+    """Capability combinations select capture without conflating graph features."""
+    device = mock.Mock(spec=wp.Device)
+    device.is_cpu = backend == "cpu"
+    device.is_cuda = backend == "cuda"
+    device.is_sycl = backend == "sycl"
+    device.supports_graph_capture = graphs
+    device.is_graph_capture_event_supported = events
+    device.is_conditional_graph_supported = conditionals
+    with mock.patch.object(wp, "get_device", return_value=device):
+      for tracing in (False, True):
+        with self.subTest(tracing=tracing), warp_util.EventTracer(enabled=tracing):
+          self.assertEqual(warp_util.graph_capture_supported(), traced_capture if tracing else graphs)
+          self.assertEqual(warp_util.graph_conditional_supported(), conditionals)
+
+  @parameterized.product(nworld=(1, 2, 64, 1024, 4096), tracing=(False, True))
+  def test_graph_capture_matches_eager(self, nworld, tracing):
+    """Captured steps and nested timings preserve uncaptured simulation results."""
+    if tracing and not wp.get_device().is_graph_capture_event_supported:
+      self.skipTest("The current device does not support captured event timing")
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <option timestep="0.002"/>
+        <worldbody>
+          <geom type="plane" size="1 1 .1"/>
+          <body pos="0 0 .45">
+            <freejoint/>
+            <geom type="sphere" size=".5" mass="1"/>
+          </body>
+        </worldbody>
+      </mujoco>
+      """,
+      qvel_noise=0.03,
+      nworld=nworld,
+    )
+    qpos, qvel = d.qpos.numpy().copy(), d.qvel.numpy().copy()
+    qpos[:, 0] += 0.25 * (np.arange(nworld) % 8)
+    qvel[:, 0] += 0.5 * (np.arange(nworld) % 3)
+    references = []
+    for world in range(nworld):
+      reference = copy.copy(mjd)
+      reference.qpos[:] = qpos[world]
+      reference.qvel[:] = qvel[world]
+      references.append(reference)
+    eager = mjw.put_data(mjm, references[0], nworld=nworld)
+    for state in (d, eager):
+      state.qpos.assign(qpos)
+      state.qvel.assign(qvel)
+
+    captured_step = warp_util.event_scope(mjw.step, name="captured_step")
+    with warp_util.EventTracer(enabled=tracing) as tracer:
+      self.assertTrue(warp_util.graph_capture_supported())
+      with wp.ScopedCapture() as capture:
+        captured_step(m, d)
+
+      for _ in range(3):
+        d.qacc.fill_(wp.inf)
+        eager.qacc.fill_(wp.inf)
+        wp.capture_launch(capture.graph)
+        if tracing:
+          event_times, subtrace = tracer.trace()["captured_step"]
+          self.assertIsInstance(event_times, tuple)
+          self.assertLen(event_times, 1)
+          self.assertGreater(event_times[0], 0.0)
+          self.assertTrue(subtrace)
+
+          def check_trace(trace):
+            for times, children in trace.values():
+              self.assertIsInstance(times, tuple)
+              self.assertTrue(all(np.isfinite(time) and time >= 0.0 for time in times))
+              check_trace(children)
+
+          check_trace(subtrace)
+        else:
+          self.assertEmpty(tracer.trace())
+        mjw.step(m, eager)
+        for field in ("qpos", "qvel", "qacc", "time"):
+          _assert_eq(getattr(d, field).numpy(), getattr(eager, field).numpy(), field)
+        for world, reference in enumerate(references):
+          mujoco.mj_step(mjm, reference)
+          for field in ("qpos", "qvel", "qacc"):
+            _assert_eq(getattr(d, field).numpy()[world], getattr(reference, field), field)
+        self.assertGreater(int(d.nacon.numpy()[0]), 0)
+    if nworld > 1:
+      self.assertGreater(np.linalg.norm(d.qpos.numpy()[0] - d.qpos.numpy()[1]), 0.1)
 
   def test_forward_energy(self):
     _, mjd, _, d = test_data.fixture(

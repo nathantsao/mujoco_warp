@@ -20,6 +20,7 @@ import warp as wp
 
 def pytest_addoption(parser):
   parser.addoption("--cpu", action="store_true", default=False, help="run tests with cpu")
+  parser.addoption("--device", action="store", default=None, help="run tests on a Warp device, e.g. sycl:0")
   parser.addoption(
     "--verify_cuda",
     action="store_true",
@@ -43,6 +44,8 @@ def pytest_configure(config):
     wp.config.kernel_cache_dir = os.path.expanduser(kernel_cache_dir)
   if config.getoption("--cpu"):
     wp.set_device("cpu")
+  if config.getoption("--device"):
+    wp.set_device(config.getoption("--device"))
   if config.getoption("--verify_cuda"):
     wp.config.verify_cuda = True
   if config.getoption("--lineinfo"):

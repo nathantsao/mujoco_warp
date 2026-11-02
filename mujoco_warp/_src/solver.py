@@ -34,6 +34,7 @@ from mujoco_warp._src.types import OverflowType
 from mujoco_warp._src.types import SolverContext
 from mujoco_warp._src.warp_util import cache_kernel
 from mujoco_warp._src.warp_util import event_scope
+from mujoco_warp._src.warp_util import graph_conditional_supported
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
@@ -541,9 +542,9 @@ def _compute_efc_eval_pt_pyramidal(
     x = ctx_Jaref + alpha * ctx_jv
     quad0 = _eval_pt_direct_cost_alpha_zero(ctx_Jaref, efc_D)
     cost0 = wp.where(ctx_Jaref < 0.0, quad0, 0.0)
-    # _eval_pt_direct_shifted returns quad(alpha) - quad(0); add back quad(0) when the
-    # constraint was inactive at alpha=0 (i.e. cost(0) = 0) so we get quad(alpha) - 0.
-    offset = quad0 - cost0
+    # Shift by quad(0) only for rows initially inactive. Select the active row's exact
+    # zero offset: fast math can reassociate quad0 - cost0 into the small cost delta.
+    offset = wp.where(ctx_Jaref < 0.0, 0.0, quad0)
     if x < 0.0:
       return _eval_pt_direct_shifted(ctx_Jaref, ctx_jv, efc_D, alpha, offset)
     return wp.vec3(-cost0, 0.0, 0.0)
@@ -598,7 +599,7 @@ def _compute_efc_eval_pt_elliptic(
     quad0 = _eval_pt_direct_cost_alpha_zero(ctx_Jaref, efc_D)
     cost0 = wp.where(ctx_Jaref < 0.0, quad0, 0.0)
     # See _compute_efc_eval_pt_pyramidal for the offset rationale.
-    offset = quad0 - cost0
+    offset = wp.where(ctx_Jaref < 0.0, 0.0, quad0)
     if x < 0.0:
       return _eval_pt_direct_shifted(ctx_Jaref, ctx_jv, efc_D, alpha, offset)
     return wp.vec3(-cost0, 0.0, 0.0)
@@ -715,7 +716,7 @@ def _compute_efc_eval_pt_3alphas_pyramidal(
     quad0 = _eval_pt_direct_cost_alpha_zero(ctx_Jaref, efc_D)
     cost0 = wp.where(ctx_Jaref < 0.0, quad0, 0.0)
     # See _compute_efc_eval_pt_pyramidal for the offset rationale.
-    offset = quad0 - cost0
+    offset = wp.where(ctx_Jaref < 0.0, 0.0, quad0)
     pt_lo, pt_hi, pt_mid = _eval_pt_direct_shifted_3alphas(ctx_Jaref, ctx_jv, efc_D, lo_alpha, hi_alpha, mid_alpha, offset)
     inactive = wp.vec3(-cost0, 0.0, 0.0)
     return (
@@ -788,7 +789,7 @@ def _compute_efc_eval_pt_3alphas_elliptic(
     quad0 = _eval_pt_direct_cost_alpha_zero(ctx_Jaref, efc_D)
     cost0 = wp.where(ctx_Jaref < 0.0, quad0, 0.0)
     # See _compute_efc_eval_pt_pyramidal for the offset rationale.
-    offset = quad0 - cost0
+    offset = wp.where(ctx_Jaref < 0.0, 0.0, quad0)
     pt_lo, pt_hi, pt_mid = _eval_pt_direct_shifted_3alphas(ctx_Jaref, ctx_jv, efc_D, lo_alpha, hi_alpha, mid_alpha, offset)
     inactive = wp.vec3(-cost0, 0.0, 0.0)
     return (
@@ -3545,7 +3546,7 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
       # of SMs on the GPU. We can now query the SM count:
       # https://github.com/NVIDIA/warp/commit/f3814e7e5459e5fd13032cf0fddb3daddd510f30
 
-      if wp.get_device().is_cuda:
+      if not wp.get_device().is_cpu:
         sm_count = wp.get_device().sm_count
 
         # Here we assume one block has 256 threads. We use a factor of 6, which
@@ -4119,7 +4120,7 @@ def _solve(m: types.Model, d: types.Data, ctx: SolverContext, compact: bool = Fa
       outputs=[ctx.search, ctx.search_dot, ctx.prev_grad, ctx.prev_Mgrad, ctx.done, nsolving],
       block_dim=m.block_dim.solve_init_search_cg,
     )
-  if m.opt.iterations != 0 and m.opt.graph_conditional:
+  if m.opt.iterations != 0 and m.opt.graph_conditional and graph_conditional_supported():
     # Note: the iteration kernel (indicated by while_body) is repeatedly launched
     # as long as condition_iteration is not zero.
     # condition_iteration is a warp array of size 1 and type int, it counts the number

@@ -53,7 +53,7 @@ class EventTracer:
 
   Use as a context manager like so:
 
-    @event_trace
+    @event_scope
     def my_warp_function(...):
       ...
 
@@ -165,6 +165,24 @@ def cache_kernel(func):
     return _KERNEL_CACHE[key]
 
   return wrapper
+
+
+def graph_capture_supported(*, event_trace: bool | None = None) -> bool:
+  """Returns True if the current execution context can capture steps into graphs.
+
+  GPU event tracing requires replay-visible captured events, independently of
+  ordinary command-graph support. Pass event_trace to select a policy before
+  entering an EventTracer; by default the active tracer determines the policy.
+  """
+  device = wp.get_device()
+  if event_trace is None:
+    event_trace = _STACK is not None
+  return device.supports_graph_capture and (not event_trace or device.is_cpu or device.is_graph_capture_event_supported)
+
+
+def graph_conditional_supported() -> bool:
+  """Returns True if the current device supports wp.capture_while and wp.capture_if."""
+  return wp.get_device().is_conditional_graph_supported
 
 
 def check_toolkit_driver():

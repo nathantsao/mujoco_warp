@@ -37,6 +37,7 @@ from absl import flags
 from etils import epath
 
 import mujoco_warp as mjw
+from mujoco_warp._src import warp_util
 
 
 class EngineOptions(enum.IntEnum):
@@ -63,9 +64,12 @@ def key_callback(key: int) -> None:
 
 
 def _compile_step(m, d):
+  """Captures GPU stepping while preserving the CPU viewer's eager path."""
+  if wp.get_device().is_cpu or not warp_util.graph_capture_supported():
+    return None
+
   print("Compiling physics step...", end="", flush=True)
   start = time.time()
-  # capture the whole step function as a CUDA graph
   with wp.ScopedCapture() as capture:
     mjw.step(m, d)
   elapsed = time.time() - start
@@ -85,7 +89,7 @@ def _make_warp_step_fn(mjm, m, d, graph, ctrls=None):
     if mjm.opt != opt:
       opt = copy.copy(mjm.opt)
       m = mjw.put_model(mjm)
-      graph = _compile_step(m, d) if wp.get_device().is_cuda else None
+      graph = _compile_step(m, d)
     wp.copy(d.ctrl, wp.array([mjd.ctrl.astype(np.float32)]))
     wp.copy(d.act, wp.array([mjd.act.astype(np.float32)]))
     wp.copy(d.xfrc_applied, wp.array([mjd.xfrc_applied], dtype=wp.spatial_vector))
@@ -161,10 +165,10 @@ def _main(argv: Sequence[str]) -> None:
   else:
     wp.set_device(cli.DEVICE.value)
 
-    graph = _compile_step(m, d) if wp.get_device().is_cuda else None
+    graph = _compile_step(m, d)
     if graph is None:
       mjw.step(m, d)  # warmup step
-      print("Running Warp unoptimized on CPU.")
+      print(f"Running Warp eagerly on {wp.get_device()}.")
     broadphase, filter = mjw.BroadphaseType(m.opt.broadphase).name, mjw.BroadphaseFilter(m.opt.broadphase_filter).name
     solver, cone = mjw.SolverType(m.opt.solver).name, mjw.ConeType(m.opt.cone).name
     integrator = mjw.IntegratorType(m.opt.integrator).name

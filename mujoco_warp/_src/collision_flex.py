@@ -41,6 +41,7 @@ from mujoco_warp._src.types import mat63
 from mujoco_warp._src.types import vec5
 from mujoco_warp._src.warp_util import cache_kernel
 from mujoco_warp._src.warp_util import event_scope
+from mujoco_warp._src.warp_util import graph_conditional_supported
 
 wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
@@ -3078,7 +3079,7 @@ def _run_filter_flex_fps(
       ],
     )
 
-  if m.opt.graph_conditional:
+  if m.opt.graph_conditional and graph_conditional_supported():
     wp.capture_while(ws.fps_condition, while_body=_fps_iteration)
   else:
     for _ in range(1, MJ_MAXCONPAIR):

@@ -335,6 +335,68 @@ def _eval_elliptic_delta(
   )
 
 
+@wp.kernel(module="unique", module_options={"fast_math": True})
+def _eval_unilateral_delta(
+  # In:
+  elliptic: bool,
+  residual: wp.array[float],
+  ray: wp.array[float],
+  diagonal: wp.array[float],
+  frictionloss: wp.array[float],
+  alphas: wp.array[float],
+  # Out:
+  result_out: wp.array3d[wp.vec3],
+):
+  row, sample = wp.tid()
+  alpha = alphas[sample]
+  if elliptic:
+    single = solver._compute_efc_eval_pt_elliptic(
+      row,
+      alpha,
+      0,
+      0,
+      1.0,
+      int(types.ConstraintType.LIMIT_JOINT),
+      diagonal,
+      frictionloss,
+      residual[row],
+      ray[row],
+      wp.vec3(0.0),
+      types.vec5(0.0),
+      row,
+      wp.vec3(0.0),
+      wp.vec3(0.0),
+    )
+    lo, hi, mid = solver._compute_efc_eval_pt_3alphas_elliptic(
+      row,
+      alpha,
+      0.5 * alpha,
+      1.5 * alpha,
+      0,
+      0,
+      1.0,
+      int(types.ConstraintType.LIMIT_JOINT),
+      diagonal,
+      frictionloss,
+      residual[row],
+      ray[row],
+      wp.vec3(0.0),
+      types.vec5(0.0),
+      row,
+      wp.vec3(0.0),
+      wp.vec3(0.0),
+    )
+  else:
+    single = solver._compute_efc_eval_pt_pyramidal(row, alpha, 0, 0, diagonal[row], frictionloss, residual[row], ray[row])
+    lo, hi, mid = solver._compute_efc_eval_pt_3alphas_pyramidal(
+      row, alpha, 0.5 * alpha, 1.5 * alpha, 0, 0, diagonal[row], frictionloss, residual[row], ray[row]
+    )
+  result_out[row, sample, 0] = single
+  result_out[row, sample, 1] = lo
+  result_out[row, sample, 2] = hi
+  result_out[row, sample, 3] = mid
+
+
 class SolverTest(parameterized.TestCase):
   def test_newton_decrement_termination(self):
     """Newton stops when only its local model predicts convergence."""
@@ -1036,6 +1098,100 @@ class SolverTest(parameterized.TestCase):
     solver._linesearch(m, d, ctx)
 
     np.testing.assert_allclose(d.qacc.numpy()[:, 0], targets, rtol=1e-6)
+
+  @parameterized.parameters(ConeType.PYRAMIDAL, ConeType.ELLIPTIC)
+  def test_unilateral_shifted_cost_preserves_exact_zero_offset(self, cone):
+    """Fast math must not reintroduce absolute cost into a shifted active row."""
+    residual = np.array([-19.48092269897461, -0.1, 0.1, 0.1], dtype=np.float32)
+    ray = np.array([-0.0013421040493994951, 1.0, -1.0, 0.1], dtype=np.float32)
+    diagonal = np.array([0.7337172627449036, 0.7, 0.7, 0.7], dtype=np.float32)
+    alphas = np.array([0.0, 1.0e-4, 0.2, 1.0], dtype=np.float32)
+    result = wp.empty((len(residual), len(alphas), 4), dtype=wp.vec3)
+    wp.launch(
+      _eval_unilateral_delta,
+      dim=(len(residual), len(alphas)),
+      inputs=[
+        cone == ConeType.ELLIPTIC,
+        wp.array(residual),
+        wp.array(ray),
+        wp.array(diagonal),
+        wp.zeros(len(residual), dtype=float),
+        wp.array(alphas),
+      ],
+      outputs=[result],
+    )
+
+    r = residual.astype(np.float64)[:, None, None]
+    v = ray.astype(np.float64)[:, None, None]
+    d = diagonal.astype(np.float64)[:, None, None]
+    a = alphas.astype(np.float64)[None, :, None] * np.array([1.0, 1.0, 0.5, 1.5])[None, None, :]
+    x = r + a * v
+    active_delta = np.where(r < 0, a * (d * v * r + 0.5 * a * d * v * v), 0.5 * d * x * x)
+    expected_cost = np.where(x < 0, active_delta, np.where(r < 0, -0.5 * d * r * r, 0.0))
+    actual = result.numpy()
+    np.testing.assert_array_equal(actual[:, 0, :, 0], 0.0)
+    np.testing.assert_allclose(actual[..., 0], expected_cost, rtol=2e-6, atol=1e-9)
+    np.testing.assert_allclose(actual[..., 1], np.where(x < 0, d * v * x, 0.0), rtol=2e-6, atol=1e-8)
+    np.testing.assert_allclose(actual[..., 2], np.where(x < 0, d * v * v, 0.0), rtol=2e-6, atol=1e-8)
+
+  @parameterized.product(cone=(ConeType.PYRAMIDAL, ConeType.ELLIPTIC), nworld=(1, 2, 64, 1024, 4096))
+  def test_linesearch_accepts_small_unilateral_improvement(self, cone, nworld):
+    """An active constraint's baseline cost must not hide an improving step."""
+    _, _, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <worldbody>
+          <body>
+            <joint type="slide"/>
+            <geom size="0.1"/>
+          </body>
+        </worldbody>
+      </mujoco>
+      """,
+      overrides={
+        "opt.cone": cone,
+        "opt.jacobian": mujoco.mjtJacobian.mjJAC_DENSE,
+        "opt.iterations": 0,
+        "opt.ls_iterations": 50,
+      },
+      nworld=nworld,
+      njmax=1,
+    )
+    residual = np.float32(-19.48092269897461)
+    diagonal = np.float32(0.7337172627449036)
+    force = np.float32(float(diagonal) * float(residual) - 0.002)
+    target = (float(force) - float(diagonal) * float(residual)) / (1.0 + float(diagonal))
+    ctx = solver._create_solver_context(m, d)
+
+    d.ne.zero_()
+    d.nf.zero_()
+    d.nefc.fill_(1)
+    d.nacon.zero_()
+    d.M.fill_(1.0)
+    d.qacc.zero_()
+    d.efc.Ma.zero_()
+    d.qfrc_smooth.fill_(force)
+    d.efc.J.fill_(1.0)
+    d.efc.D.fill_(diagonal)
+    d.efc.frictionloss.zero_()
+    ctx.Jaref.fill_(residual)
+    ctx.search.fill_(target)
+    ctx.search_dot.fill_(target * target)
+    ctx.done.fill_(False)
+    ctx.search_unchanged.fill_(False)
+    _set_inertia_scale(m, d, ctx)
+
+    solver._linesearch(m, d, ctx)
+
+    actual = d.qacc.numpy()[:, 0]
+    np.testing.assert_allclose(actual, target, rtol=1e-5, atol=1e-6)
+    self.assertTrue(np.all(ctx.alpha.numpy() > 0.0))
+    self.assertTrue(np.all(ctx.improvement.numpy() > 0.0))
+    delta = actual.astype(np.float64) * (
+      float(diagonal) * float(residual) - float(force) + 0.5 * (1.0 + float(diagonal)) * actual
+    )
+    self.assertTrue(np.all(delta < 0.0))
+    np.testing.assert_array_equal(d.overflow.numpy(), 0)
 
   def test_linesearch_iterations_overflow(self):
     """Linesearch records overflow when iteration limit reached without convergence."""

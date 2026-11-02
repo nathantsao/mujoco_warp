@@ -15,6 +15,8 @@
 
 """Tests for sensor functions."""
 
+import copy
+
 import mujoco
 import numpy as np
 import warp as wp
@@ -569,6 +571,62 @@ class SensorTest(parameterized.TestCase):
     sensordata = d.sensordata.numpy()[0]
     _assert_eq(sensordata, mjd.sensordata, "sensordata")
     self.assertTrue(sensordata.any())  # check that sensordata is not empty
+
+  @parameterized.parameters(1, 2)
+  def test_contact_sensor_graph_capture(self, nworld):
+    """Captured contact sorting matches eager sensors and MuJoCo C."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+      <mujoco>
+        <worldbody>
+          <geom name="floor" type="plane" size="1 1 .1"/>
+          <body pos="-.3 0 .09">
+            <freejoint/>
+            <geom type="sphere" size=".1"/>
+          </body>
+          <body pos=".3 0 .065">
+            <freejoint/>
+            <geom type="sphere" size=".1"/>
+          </body>
+        </worldbody>
+        <sensor>
+          <contact geom1="floor" data="found dist pos normal" reduce="mindist" num="2"/>
+        </sensor>
+      </mujoco>
+      """,
+      overrides={"opt.contact_sensor_maxmatch": 5},
+      nworld=nworld,
+    )
+    references = [copy.copy(mjd) for _ in range(nworld)]
+    if nworld == 2:
+      references[1].qpos[2] = 0.045
+      references[1].qpos[9] = 0.085
+    for reference in references:
+      reference.qvel[:] = 0.01
+    eager = mjw.put_data(mjm, mjd, nworld=nworld)
+    with wp.ScopedCapture() as capture:
+      mjw.sensor_pos(m, d)
+
+    for _ in range(3):
+      for reference in references:
+        reference.qpos[2] += 0.001
+        mujoco.mj_forward(mjm, reference)
+        self.assertEqual(reference.ncon, 2)
+      qpos = np.stack([reference.qpos for reference in references])
+      qvel = np.stack([reference.qvel for reference in references])
+      for state in (d, eager):
+        state.qpos.assign(qpos)
+        state.qvel.assign(qvel)
+        mjw.forward(m, state)
+        state.sensordata.fill_(wp.inf)
+      wp.capture_launch(capture.graph)
+      mjw.sensor_pos(m, eager)
+      captured = d.sensordata.numpy()
+      _assert_eq(captured, eager.sensordata.numpy(), "captured/eager contact sensors")
+      for world, reference in enumerate(references):
+        _assert_eq(captured[world], reference.sensordata, f"contact sensors world {world}")
+      if nworld == 2:
+        self.assertGreater(np.linalg.norm(captured[0] - captured[1]), 0.01)
 
   def test_contact_sensor_subtree(self):
     """Test contact sensor with subtree matching semantics."""
