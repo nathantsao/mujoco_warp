@@ -528,7 +528,7 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
     mjm.nv,
     0,
     is_sparse(mjm),
-    types.TILE_SIZE_JTDAJ_SPARSE if is_sparse(mjm) else types.TILE_SIZE_JTDAJ_DENSE,
+    types.tile_size_jtdaj_sparse() if is_sparse(mjm) else types.tile_size_jtdaj_dense(),
     augment_cholesky=mjm.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON and mjm.nv > 32,
   )[1]
   m.nacttrnbody = (mjm.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY).sum()
@@ -643,6 +643,10 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
   m.block_dim.solve_init_search_cg = _nv_block
   if mjm.nv > 500:
     m.block_dim.linesearch_iterative = 256
+  elif wp.get_device().is_sycl:
+    m.block_dim.linesearch_iterative = 16
+  if wp.get_device().is_sycl:
+    m.block_dim.cholesky_factorize_solve = 128
   m.is_sparse = is_sparse(mjm)
   m.has_fluid = bool(mjm.opt.wind.any() or mjm.opt.density > 0 or mjm.opt.viscosity > 0)
   m.nflexintcell = _get_nflexintcell(mjm)
@@ -1960,7 +1964,7 @@ def make_data(
     condim_arrays.append(mjm.flex_condim)
   sizes["nmaxcondim"] = np.concatenate(condim_arrays).max()
   sizes["nmaxpyramid"] = np.maximum(1, 2 * (sizes["nmaxcondim"] - 1))
-  tile_size = types.TILE_SIZE_JTDAJ_SPARSE if is_sparse(mjm) else types.TILE_SIZE_JTDAJ_DENSE
+  tile_size = types.tile_size_jtdaj_sparse() if is_sparse(mjm) else types.tile_size_jtdaj_dense()
   sizes["njmax_pad"], sizes["nv_pad"] = _get_padded_sizes(
     mjm.nv,
     njmax,
@@ -2195,7 +2199,7 @@ def put_data(
     condim_arrays.append(mjm.flex_condim)
   sizes["nmaxcondim"] = np.concatenate(condim_arrays).max()
   sizes["nmaxpyramid"] = np.maximum(1, 2 * (sizes["nmaxcondim"] - 1))
-  tile_size = types.TILE_SIZE_JTDAJ_SPARSE if is_sparse(mjm) else types.TILE_SIZE_JTDAJ_DENSE
+  tile_size = types.tile_size_jtdaj_sparse() if is_sparse(mjm) else types.tile_size_jtdaj_dense()
   sizes["njmax_pad"], sizes["nv_pad"] = _get_padded_sizes(
     mjm.nv,
     njmax,

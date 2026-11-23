@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# TODO: add sycl constants (these are default cuda values)
 import dataclasses
 import enum
 import operator
@@ -40,6 +41,10 @@ MJ_MAX_EPAFACES = 5
 TILE_SIZE_JTDAJ_SPARSE = 16
 TILE_SIZE_JTDAJ_DENSE = 16
 
+# SYCL tile sizes (a smaller tile makes the SYCL tile-Cholesky and padded nv faster)
+TILE_SIZE_JTDAJ_SPARSE_SYCL = 8
+TILE_SIZE_JTDAJ_DENSE_SYCL = 8
+
 # max M block size where dense tile-Cholesky beats sparse LDL (wins to ~64, degrades past ~80)
 M_BLOCK_DENSE_MAX = 64
 
@@ -58,6 +63,15 @@ EFM_CON_MAX_DOF = 24
 
 # max nodes per interpolated flex cell ((2 + 1)^3 for quadratic)
 FLEX_INTERP_MAX_NODES = 27
+
+# Constants depending on Warp device
+def tile_size_jtdaj_sparse() -> int:
+  """Returns the sparse JTDAJ tile size for the current Warp device."""
+  return TILE_SIZE_JTDAJ_SPARSE_SYCL if wp.get_device().is_sycl else TILE_SIZE_JTDAJ_SPARSE
+
+def tile_size_jtdaj_dense() -> int:
+  """Returns the dense JTDAJ tile size for the current Warp device."""
+  return TILE_SIZE_JTDAJ_DENSE_SYCL if wp.get_device().is_sycl else TILE_SIZE_JTDAJ_DENSE
 
 
 # TODO(team): add check that all wp.launch_tiled 'block_dim' settings are configurable

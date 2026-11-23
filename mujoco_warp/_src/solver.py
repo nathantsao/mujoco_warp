@@ -3062,7 +3062,7 @@ def _cholesky_factorize_solve(
   else:
     if skip_unchanged:
       wp.launch_tiled(
-        _update_gradient_cholesky_blocked_skip_unchanged(types.TILE_SIZE_JTDAJ_DENSE, m.nv_pad, m.nv, skip_noflip),
+        _update_gradient_cholesky_blocked_skip_unchanged(types.tile_size_jtdaj_dense(), m.nv_pad, m.nv, skip_noflip),
         dim=d.nworld,
         inputs=[
           ctx.done,
@@ -3081,7 +3081,7 @@ def _cholesky_factorize_solve(
       )
     else:
       wp.launch_tiled(
-        _update_gradient_cholesky_blocked(types.TILE_SIZE_JTDAJ_DENSE, m.nv_pad, m.nv),
+        _update_gradient_cholesky_blocked(types.tile_size_jtdaj_dense(), m.nv_pad, m.nv),
         dim=d.nworld,
         inputs=[ctx.done, ctx.grad.reshape(shape=(d.nworld, ctx.grad.shape[1], 1)), ctx.h, ctx.hfactor],
         outputs=[
@@ -3465,7 +3465,7 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
       if compact:
         # compact path: d.M is the dense 3D compact inertia block (nworld, nv_pad, nv_pad)
         wp.launch_tiled(
-          _update_gradient_JTDAJ_dense_tiled_compact(m.nv_pad, types.TILE_SIZE_JTDAJ_DENSE, d.njmax),
+          _update_gradient_JTDAJ_dense_tiled_compact(m.nv_pad, types.tile_size_jtdaj_dense(), d.njmax),
           dim=d.nworld,
           inputs=[
             d.nefc,
@@ -3480,7 +3480,7 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
         )
       else:
         wp.launch_tiled(
-          _update_gradient_JTDAJ_dense_tiled(m.nv_pad, types.TILE_SIZE_JTDAJ_DENSE, d.njmax, m.M_colind.shape[0]),
+          _update_gradient_JTDAJ_dense_tiled(m.nv_pad, types.tile_size_jtdaj_dense(), d.njmax, m.M_colind.shape[0]),
           dim=d.nworld,
           inputs=[
             m.M_colind,
@@ -4341,7 +4341,7 @@ def smooth_solve_compact(m: types.Model, d: types.Data):
     outputs=[d.crhs],
   )
   wp.launch_tiled(
-    _cholesky_factorize_solve_blocked(types.TILE_SIZE_JTDAJ_DENSE, d.nvmax_pad),
+    _cholesky_factorize_solve_blocked(types.tile_size_jtdaj_dense(), d.nvmax_pad),
     dim=d.nworld,
     inputs=[d.cM, d.crhs],
     outputs=[d.cqLD, d.cx],
